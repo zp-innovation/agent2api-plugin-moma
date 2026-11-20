@@ -11,17 +11,23 @@
  *      不能用来校验 API Key —— 验 key 必须真打一次 /chat/completions（见 validateKey）。
  *
  *   ② 余额：桌面客户端面 https://zhenze-huhehaote.cmecloud.cn/desktop/manager
- *      用 MobileClaw 的登录态（Bearer，JWT，2 小时）鉴权。GET /credits/v2/exp-credit
- *      给出 {expireTime, remainTokens, totalTokens}，/subscriptions/token-plans-personal
- *      给出已购 Token 套餐的到期时刻。**API Key 打这一面恒 401**，两套凭据不通用。
+ *      用 MobileClaw 的登录态（Bearer，JWT，2 小时）鉴权。**API Key 打这一面恒 401**，
+ *      两套凭据不通用。这一面只有三个有用的端点：
+ *        · POST /token-welfare/balance {queryStatus:"VALID"} —— 客户端「查看领取详情」
+ *          弹窗的数据源，按领取活动逐笔给出 {activityName, expireTime, receiveTime,
+ *          receivedTokenAmount, remainingToken}。这是**唯一**能拿到到期时刻的接口。
+ *        · GET  /credits/v2/exp-credit —— 汇总 {expireTime, remainTokens, totalTokens}，
+ *          但 expireTime 实测恒为 null（平台没填），只能当「总量/剩余」的交叉校验。
+ *        · GET  /subscriptions/token-plans-personal/{provider} —— 已购 Token 套餐。
  *
  * 所以「余额 / 有效期」能不能显示，取决于登录时有没有一起绑定 MobileClaw 账号
  * （手机号 + 密码，或手机号 + 短信验证码）。没绑定时余额列会明确写「未绑定」，
  * 而不是假装查过了。
  *
- * 另：移动云 MoMA 控制台首页那张「Token 免费额度 25,000K / 2026-12-20 到期」是
- * Maas 平台侧的额度，只存在于 ecloud.10086.cn 的 SSO 控制台里，**没有对外 API**
- * （见 README「已知边界」），插件读不到，也不会拿桌面端的额度去冒充它。
+ * 控制台首页那张「Token 免费额度 25,000K / 2026-12-20 到期」与上面 token-welfare 的
+ * 三笔领取额度是同一份数据（25,000,000 + 10,000,000 + 1,000,000 = 36,000,000，剩余
+ * 合计等于 /credits/v2/exp-credit 的 remainTokens），所以不需要 ecloud.10086.cn 的
+ * SSO cookie —— 有 MobileClaw 登录态就够了。
  */
 
 import { ICON } from "./icon.mjs";
@@ -532,24 +538,64 @@ function planWindows(plans, group) {
   return rows;
 }
 
-export function usageOf(credit, plans) {
+/**
+ * token-welfare/balance 的逐笔领取额度 → 窗口行。
+ *
+ * aside: true 是必须的：这些行是同一池子里的三笔来源，任何一笔单独归零都
+ * 不代表账号没额度了（宿主 allowance.mjs 见到 remainingPercent===0 就直接 429）。
+ * 参与拦截的只有 usageOf 里那行「免费额度合计」。
+ */
+export function grantWindows(grants, group) {
+  const rows = [];
+  for (const g of Array.isArray(grants) ? grants : []) {
+    if (!g || typeof g !== "object") continue;
+    const total = Number(g.receivedTokenAmount);
+    const remain = Number(g.remainingToken);
+    if (!Number.isFinite(total) || total <= 0) continue;
+    const at = millis(g.expireTime);
+    const name = String(g.activityName || g.activityCode || "领取额度").trim() || "领取额度";
+    rows.push({
+      name,
+      group,
+      limit: total,
+      balance: Number.isFinite(remain) ? Math.max(0, remain) : undefined,
+      used: Number.isFinite(remain) ? Math.max(0, Math.min(100, ((total - remain) / total) * 100)) : undefined,
+      unit: "Tokens",
+      aside: true,
+      resetsAt: at || undefined,
+    });
+  }
+  return rows;
+}
+
+export function usageOf(credit, plans, grants) {
   const windows = [];
-  let expiresAt = 0;
   const remain = Number(credit?.remainTokens);
   const used = Number(credit?.totalTokens);
+  const detail = grantWindows(grants, "领取明细");
+
   if (Number.isFinite(remain)) {
     const limit = Number.isFinite(used) ? remain + used : undefined;
     windows.push({
-      name: "MobileClaw 体验额度",
+      name: "免费额度合计",
       group: "额度",
       limit,
       balance: remain,
       used: limit ? Math.max(0, Math.min(100, (used / limit) * 100)) : undefined,
       unit: "Tokens",
+      // 汇总行的 expireTime 目前恒为 null；到期日以明细里最早的一笔为准（见下）
       resetsAt: millis(credit?.expireTime) || undefined,
     });
   }
-  expiresAt = millis(credit?.expireTime);
+  for (const row of detail) windows.push(row);
+
+  // 有效期 = 「免费额度最早到期」与「付费套餐最晚到期」里较晚的那个：
+  // 免费额度到期只说明开始消耗套餐，账号本身还有效。
+  let expiresAt = 0;
+  for (const row of detail) {
+    if (row.resetsAt && (!expiresAt || row.resetsAt < expiresAt)) expiresAt = row.resetsAt;
+  }
+  if (!expiresAt) expiresAt = millis(credit?.expireTime);
   for (const row of planWindows(plans, "套餐")) {
     windows.push(row);
     if (row.resetsAt && row.resetsAt > expiresAt) expiresAt = row.resetsAt;
@@ -591,7 +637,21 @@ async function usage(getAuth, sync) {
     log("token-plans 失败", e.message);
   }
 
-  const report = usageOf(credit, plans);
+  // 领取明细：唯一能拿到「到期时间」的接口，失败就退回汇总行（三层降级的第一层）
+  let grants = [];
+  try {
+    const payload = await mgmt("/token-welfare/balance", {
+      method: "POST",
+      body: { queryStatus: "VALID" },
+      token,
+    });
+    if (payload && payload.success !== false && Array.isArray(payload.data)) grants = payload.data;
+    else log("token-welfare 返回异常", JSON.stringify(payload ?? null).slice(0, 200));
+  } catch (e) {
+    log("token-welfare 失败", e.message);
+  }
+
+  const report = usageOf(credit, plans, grants);
   if (!report.windows.length) {
     return { empty: true, emptyText: "平台未返回额度读数" };
   }
@@ -765,5 +825,5 @@ export async function MomaPlugin({ client } = {}) {
 export const _internal = {
   ID, API, MGMT, CHAT, FALLBACK_PROVIDER,
   rsaEncrypt, millis, jwtExp, newDevice, deviceOf, maskPhone, normalizePhone,
-  isChatModel, contextOf, modelMeta, usageOf, planWindows, sessionOf,
+  isChatModel, contextOf, modelMeta, usageOf, planWindows, grantWindows, sessionOf,
 };

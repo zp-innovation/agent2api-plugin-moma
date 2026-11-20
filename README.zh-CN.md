@@ -58,15 +58,18 @@ file:/data/projects/agent2api/data/script-plugins-src/agent2api-plugin-moma
 
 ## 界面上会显示什么
 
-**余额**列（分窗口额度）：
+**余额**列（分窗口额度），与 MobileClaw 客户端「用量统计 → 查看领取详情」弹窗同源：
 
-- `MobileClaw 体验额度` —— `GET /credits/v2/exp-credit` 的 `remainTokens` / `remainTokens + totalTokens`，单位 Tokens。
-- `<套餐名> · MM-DD 到期` —— `GET /subscriptions/token-plans-personal/{provider}` 里每一个已购 Token 套餐，标记为「旁路」（`aside`）：套餐到期不等于当前不可用，不参与网关的额度拦截，避免把正常请求误判成配额耗尽。
+- `免费额度合计` —— `GET /credits/v2/exp-credit` 的 `remainTokens` / `remainTokens + totalTokens`，单位 Tokens。这一行**参与**网关的额度拦截（归零即 429）。
+- `注册礼` / `每月登录礼` / `每日打卡礼` —— `POST /token-welfare/balance` 的逐笔领取额度（`remainingToken` / `receivedTokenAmount`），并带上各自的 `expireTime`。每行标记为「旁路」（`aside`）：三笔是同一个池子的来源，任何一笔单独归零都不代表账号没额度了，不能拿它触发拦截。
+- `<套餐名> · MM-DD 到期` —— `GET /subscriptions/token-plans-personal/{provider}` 里每一个已购 Token 套餐，同样 `aside`。
 
 **有效期**列：
 
-- 平台给了真实到期时刻（套餐 `expireTime` 或体验额度 `expireTime`）时，写进账号记录的 `expires`，按「N 天后」显示。
-- 平台没给（当前账号的 `expireTime` 就是 `null`）时显示「—」。**这是宿主的既定行为**：`account_features.long_lived` 由宿主硬编码为「仅本地提供商」，远端插件无法申报「长期有效」，见 `host/models.mjs:30`。
+- 取「免费额度里最早的一笔到期」与「付费套餐最晚到期」中较晚的那个，写进账号记录的 `expires`，按「N 天后」显示。当前账号是 2026-12-20。
+- 三笔都拿不到时（`token-welfare` 挂了）退回 `exp-credit`，而它的 `expireTime` 实测恒为 `null` → 显示「—」。**「长期有效」不用期待**：`account_features.long_lived` 由宿主硬编码为「仅本地提供商」，远端插件无法申报，见 `host/models.mjs:30`。
+
+三层降级：`token-welfare/balance`（明细 + 到期日）→ `exp-credit`（一行汇总，无到期日）→ `empty` 文案。任何一层失败都不会把整列染红。
 
 **模型能力**（模型页 → 模型能力弹窗）：
 
@@ -81,8 +84,8 @@ MoMA 的 `/v1/models` 只返回 `{id, object, created, owned_by}`，**不声明*
 
 ## 已知边界
 
-1. **移动云 MoMA 控制台首页那张「Token 免费额度 25,000.000K / 2026-12-20 到期」读不到。**
-   它是 Maas 平台侧发给 API Key 的额度，只存在于 `ecloud.10086.cn` 的 SSO 控制台（需要滑块验证码交互登录），没有任何对外 API；桌面端接口给的是另一套「MobileClaw 体验额度」（36,000,000 Tokens）。插件不会拿后者去冒充前者，窗口名就写「MobileClaw 体验额度」。
+1. **控制台首页那张「Token 免费额度 25,000.000K / 2026-12-20 到期」不需要单独去抓。**
+   它就是 `token-welfare/balance` 的三笔领取额度（25,000,000 + 10,000,000 + 1,000,000 = 36,000,000 Tokens，剩余合计 35,783,468 与 `exp-credit` 的 `remainTokens` 完全一致），所以不需要 `ecloud.10086.cn` 的 SSO cookie，也不需要滑块验证码。
 2. **API Key 消耗的额度不可观测。** 上面两套额度是分开计费的：实测用 API Key 打 `chat/completions` 前后，桌面端 `exp-credit` 的读数完全不变（delta = 0）。
 3. **refresh token 是一次性的。** `POST /auth/refresh` 每次返回新的 `accessToken` + `refreshToken`，旧的立刻失效。插件每次续期都会把新的一对写回账号记录；如果写回失败（例如手动改过账号），需要重新登录绑定。
 4. **access token 只有 2 小时。** 宿主对 `type:"api"` 的账号**不会**调用 `hooks.auth.refresh`（`host/accounts.mjs:72` 直接 return），所以续期发生在 `usage()` 里，查询余额时顺手续。

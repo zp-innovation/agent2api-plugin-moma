@@ -54,15 +54,18 @@ Four fields, only the first is required:
 
 ## What the panel shows
 
-**Balance** (windowed readings):
+**Balance** (windowed readings), same source as the client's "usage → claim details" dialog:
 
-- `MobileClaw 体验额度` — `GET /credits/v2/exp-credit`'s `remainTokens` over `remainTokens + totalTokens`, in Tokens.
-- `<plan name> · MM-DD 到期` — one row per purchased token plan from `GET /subscriptions/token-plans-personal/{provider}`, marked `aside`: a plan expiring is not "unusable right now", so it must not trip the gateway's quota blocking.
+- `免费额度合计` — `GET /credits/v2/exp-credit`'s `remainTokens` over `remainTokens + totalTokens`, in Tokens. This row **does** take part in the gateway's quota blocking (zero balance → 429).
+- `注册礼` / `每月登录礼` / `每日打卡礼` — the per-grant allowances from `POST /token-welfare/balance` (`remainingToken` over `receivedTokenAmount`), each carrying its own `expireTime`. They are marked `aside`: the three grants feed one pool, so any single one hitting zero must not be read as "account exhausted".
+- `<plan name> · MM-DD 到期` — one row per purchased token plan from `GET /subscriptions/token-plans-personal/{provider}`, also `aside`.
 
 **Expiry**:
 
-- When the platform reports a real expiry (plan `expireTime` or credit `expireTime`), it is written to the account's `expires` and rendered as "in N days".
-- When it does not (this account's `expireTime` is literally `null`), the column shows "—". That is host behaviour: `account_features.long_lived` is hard-coded to local providers only (`host/models.mjs:30`), so a remote plugin cannot declare itself "long-lived".
+- Taken as the later of "earliest free-grant expiry" and "latest paid-plan expiry", written to the account's `expires` and rendered as "in N days". Currently 2026-12-20 for this account.
+- If `token-welfare` is unavailable the plugin falls back to `exp-credit`, whose `expireTime` is literally `null` → the column shows "—". Do not expect "long-lived": `account_features.long_lived` is hard-coded to local providers only (`host/models.mjs:30`), so a remote plugin cannot declare it.
+
+Three-layer fallback: `token-welfare/balance` (details + expiry) → `exp-credit` (one aggregate row, no expiry) → an `empty` message. No single failure paints the whole column red.
 
 **Model capabilities** (Models page → capability dialog):
 
@@ -77,7 +80,7 @@ Check whether the table is still in sync: `node scripts/gen-caps.mjs --check` (n
 
 ## Known limits
 
-1. **The console's "Token 免费额度 25,000.000K / expires 2026-12-20" card is unreachable.** It is the Maas-side allowance attached to API keys, visible only in the `ecloud.10086.cn` SSO console (interactive slider captcha), with no public API. The desktop endpoints expose a different pool ("MobileClaw 体验额度", 36,000,000 tokens). The plugin does not pass one off as the other — the window is labelled for what it is.
+1. **The console's "Token 免费额度 25,000.000K / expires 2026-12-20" card needs no separate scraping.** It is exactly the three grants from `token-welfare/balance` (25,000,000 + 10,000,000 + 1,000,000 = 36,000,000 tokens; their remaining sum, 35,783,468, equals `exp-credit`'s `remainTokens`). No `ecloud.10086.cn` SSO cookie and no slider captcha are involved.
 2. **API-key consumption is unobservable.** The two pools bill separately: a `chat/completions` call with an API key leaves the desktop `exp-credit` reading unchanged (delta = 0).
 3. **Refresh tokens are single-use.** Each `POST /auth/refresh` returns a new `accessToken` + `refreshToken` and invalidates the old pair. The plugin writes the new pair back to the account record on every renewal.
 4. **Access tokens live 2 hours.** The host never calls `hooks.auth.refresh` for `type: "api"` accounts (`host/accounts.mjs:72` returns early), so renewal happens inside `usage()`.
