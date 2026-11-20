@@ -496,7 +496,7 @@ async function usage(getAuth, sync) {
   if (!auth?.mc?.refresh && !auth?.mc?.access) {
     // 没绑 MobileClaw 账号：余额不是「查失败」，是「没配」。用 empty 通道说清楚，
     // 而不是抛错把整列染红。
-    return { empty: true, emptyText: "未绑定 MobileClaw 账号" };
+    return { empty: true, emptyText: "未绑定 MobileClaw 账号：编辑账号填手机号 + 验证码即可查余额" };
   }
 
   let token;
