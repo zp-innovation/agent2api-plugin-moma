@@ -600,7 +600,12 @@ export function usageOf(credit, plans, grants) {
     windows.push(row);
     if (row.resetsAt && row.resetsAt > expiresAt) expiresAt = row.resetsAt;
   }
-  return { windows, expiresAt };
+  return {
+    windows,
+    // 「可用合计」读取顶层 balance -> 宿主 available；windows 只出明细，不参与分组求和
+    ...(Number.isFinite(remain) ? { balance: remain } : {}),
+    expiresAt,
+  };
 }
 
 async function usage(getAuth, sync) {
