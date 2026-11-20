@@ -1,6 +1,6 @@
 {
   "name": "agent2api-plugin-moma",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "移动云 MoMA（MobileClaw）作为 magpie / agent2api provider：OpenAI 兼容推理 + 通过 MobileClaw 登录态上报 Token 余额与套餐到期",
   "type": "module",

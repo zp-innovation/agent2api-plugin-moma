@@ -208,8 +208,19 @@ export function newDevice() {
   };
 }
 
+/*
+ * mc 在账号记录里的位置取决于写入路径：
+ *  - authorize 返回的 metadata 会被宿主整包塞进 secret，所以登录时拿到的是 auth.metadata.mc
+ *    （host/auth-record.mjs:29 secret 就是 authorize 返回对象的浅拷贝，不会摊平 metadata）；
+ *  - 插件续期后调 client.auth.set({ mc }) 写的是顶层 auth.mc。
+ * 两个位置都要读，否则老账号永远被当成「未绑定」。
+ */
+function mcOf(auth) {
+  return auth?.mc ?? auth?.metadata?.mc ?? null;
+}
+
 function deviceOf(auth) {
-  const d = auth?.mc?.device;
+  const d = mcOf(auth)?.device;
   if (d?.deviceId) return { ...d };
   return newDevice();
 }
@@ -279,7 +290,7 @@ async function loginMobileClaw(inputs, device, signal) {
  * 并且要顺手把新的一对 token 写回账号记录，否则下一次查询又用旧的。
  */
 async function accessToken(auth, sync, signal) {
-  const mc = auth?.mc;
+  const mc = mcOf(auth);
   if (!mc) return "";
   const exp = jwtExp(mc.access);
   if (mc.access && (!exp || exp - Date.now() > 5 * 60 * 1000)) return mc.access;
@@ -549,7 +560,8 @@ export function usageOf(credit, plans) {
 async function usage(getAuth, sync) {
   const auth = await getAuth();
   if (auth?.type !== "api" || !auth.key) return { signIn: "expired", error: "moma：未登录" };
-  if (!auth?.mc?.refresh && !auth?.mc?.access) {
+  const mc = mcOf(auth);
+  if (!mc?.refresh && !mc?.access) {
     // 没绑 MobileClaw 账号：余额不是「查失败」，是「没配」。用 empty 通道说清楚，
     // 而不是抛错把整列染红。
     return { empty: true, emptyText: "未绑定 MobileClaw 账号：编辑账号填手机号 + 验证码即可查余额" };
@@ -566,7 +578,7 @@ async function usage(getAuth, sync) {
   }
   if (!token) return { signIn: "expired", error: "MobileClaw 登录态缺失，请重新登录" };
 
-  const provider = auth?.mc?.provider || FALLBACK_PROVIDER;
+  const provider = mc?.provider || FALLBACK_PROVIDER;
   const credit = await mgmt("/credits/v2/exp-credit", { token }).catch((e) => {
     log("exp-credit 失败", e.message);
     return null;
@@ -583,7 +595,7 @@ async function usage(getAuth, sync) {
   if (!report.windows.length) {
     return { empty: true, emptyText: "平台未返回额度读数" };
   }
-  const who = auth?.mc?.userName || auth?.mc?.phoneMask || "";
+  const who = mc?.userName || mc?.phoneMask || "";
   await sync?.(report.expiresAt ? { expiresAt: report.expiresAt, expires: report.expiresAt } : {});
   return { ...report, ...(who ? { user: who } : {}) };
 }
