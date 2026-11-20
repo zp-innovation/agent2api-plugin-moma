@@ -25,6 +25,7 @@
  */
 
 import { ICON } from "./icon.mjs";
+import { CAPS } from "./caps.mjs";
 
 const ID = "moma";
 const HOST = "https://zhenze-huhehaote.cmecloud.cn";
@@ -335,6 +336,34 @@ export function contextOf(id) {
   return 0;
 }
 
+/* 模型能力：MoMA 的 /v1/models 只有 {id, object, created, owned_by}，
+ * 上下文 / 模态 / 工具 / 思考一律不声明。宿主 model-records.mjs:33-39 读的是
+ * model.limit.context|output 与 model.capabilities.{toolcall,reasoning,input.*}，
+ * 不填就等于「上游未声明」。所以这里分两层给：
+ *   ① CAPS[id]（caps.mjs，构建期由 models.dev 归一化匹配生成）——精确值；
+ *   ② inferCaps(id) 按名字兜底（-128k / -64k / -1M / vl / r1 …）。
+ * 两者都没有时才退回 32k / 8k 这种保守默认，宁可小也不虚报。 */
+export function inferCaps(id) {
+  const name = String(id ?? "");
+  const known = CAPS[id];
+  if (known) {
+    return { context: known.context, output: known.output, tool: known.tool !== false,
+      reasoning: known.reasoning === true, vision: known.vision === true, video: known.video === true,
+      audio: known.audio === true, pdf: known.pdf === true, source: "catalog" };
+  }
+  let context = 0;
+  const millions = /(?:^|[-_/])(\d+(?:\.\d+)?)m(?:$|[-_/])/i.exec(name);
+  if (millions) context = Math.round(Number(millions[1]) * 1_000_000);
+  if (!context) {
+    const thousands = /(?:^|[-_/])(\d{1,3})k(?:$|[-_/])/i.exec(name);
+    if (thousands) context = Number(thousands[1]) * 1024;
+  }
+  if (!context) context = 32768;
+  return { context, output: Math.min(context, 16384), tool: true,
+    reasoning: REASONING.test(name), vision: VISION.test(name), video: false, audio: false, pdf: false,
+    source: "inferred" };
+}
+
 // /v1/models 拉不到时的兜底清单：只放平台上一线在售的对话模型。
 const FALLBACK = [
   "deepseek-v4.1-flash-1017",
@@ -350,20 +379,52 @@ const FALLBACK = [
   "deepseek-r1-128k",
 ];
 
-function modelMeta(id) {
+export function modelMeta(id) {
+  const caps = inferCaps(id);
   return {
     id,
     name: id,
-    context: contextOf(id),
-    vision: VISION.test(id),
-    reasoning: REASONING.test(id),
+    context: caps.context,
+    output: caps.output,
+    tool: caps.tool,
+    vision: caps.vision,
+    video: caps.video,
+    audio: caps.audio,
+    pdf: caps.pdf,
+    reasoning: caps.reasoning,
+    source: caps.source,
+  };
+}
+
+const inputModalities = (meta) => {
+  const list = ["text"];
+  if (meta.vision) list.push("image");
+  if (meta.video) list.push("video");
+  if (meta.audio) list.push("audio");
+  if (meta.pdf) list.push("pdf");
+  return list;
+};
+
+function capabilitiesOf(meta) {
+  return {
+    temperature: true,
+    toolcall: meta.tool,
+    reasoning: meta.reasoning,
+    attachment: meta.vision,
+    input: { text: true, image: meta.vision, audio: meta.audio, video: meta.video, pdf: meta.pdf },
+    output: { text: true, image: false, audio: false, video: false, pdf: false },
+    interleaved: false,
   };
 }
 
 function configModel(meta) {
   return {
     name: meta.name,
-    limit: { context: meta.context, output: 0 },
+    limit: { context: meta.context, output: meta.output },
+    tool_call: meta.tool,
+    reasoning: meta.reasoning,
+    modalities: { input: inputModalities(meta), output: ["text"] },
+    capabilities: capabilitiesOf(meta),
   };
 }
 
@@ -377,16 +438,11 @@ function runtimeModel(meta) {
     headers: {},
     options: {},
     cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-    limit: { context: meta.context, output: 0 },
-    capabilities: {
-      temperature: true,
-      reasoning: meta.reasoning,
-      attachment: meta.vision,
-      toolcall: true,
-      input: { text: true, image: meta.vision, audio: false, video: false, pdf: false },
-      output: { text: true, image: false, audio: false, video: false, pdf: false },
-      interleaved: false,
-    },
+    limit: { context: meta.context, output: meta.output },
+    tool_call: meta.tool,
+    reasoning: meta.reasoning,
+    modalities: { input: inputModalities(meta), output: ["text"] },
+    capabilities: capabilitiesOf(meta),
     release_date: "",
   };
 }

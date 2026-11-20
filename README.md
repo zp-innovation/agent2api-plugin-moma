@@ -64,6 +64,17 @@ Four fields, only the first is required:
 - When the platform reports a real expiry (plan `expireTime` or credit `expireTime`), it is written to the account's `expires` and rendered as "in N days".
 - When it does not (this account's `expireTime` is literally `null`), the column shows "—". That is host behaviour: `account_features.long_lived` is hard-coded to local providers only (`host/models.mjs:30`), so a remote plugin cannot declare itself "long-lived".
 
+**Model capabilities** (Models page → capability dialog):
+
+MoMA's `/v1/models` returns only `{id, object, created, owned_by}` — no context window, no max output, no modalities, no tool-call or reasoning flags. There is nothing upstream to pass through, so the plugin derives it in two layers:
+
+1. `caps.mjs` — generated at build time by `node scripts/gen-caps.mjs`, which projects the [models.dev](https://models.dev) capability table onto MoMA model ids by normalized id (98 of 141 currently match; conflicting sources resolve to the largest context with `output < context`);
+2. `inferCaps()` — name-based fallback (`-128k` / `-64k` / `-1M` / `vl` / `r1` …), 32k context by default.
+
+Declarations use the shape the host reads (`host/model-records.mjs:33-39`): `limit.context`, `limit.output`, `capabilities.toolcall`, `capabilities.reasoning`, `capabilities.input.{image,video,audio,pdf}`, plus the flat `tool_call` / `reasoning` / `modalities` aliases.
+
+Check whether the table is still in sync: `node scripts/gen-caps.mjs --check` (needs network; non-zero exit means regeneration is required).
+
 ## Known limits
 
 1. **The console's "Token 免费额度 25,000.000K / expires 2026-12-20" card is unreachable.** It is the Maas-side allowance attached to API keys, visible only in the `ecloud.10086.cn` SSO console (interactive slider captcha), with no public API. The desktop endpoints expose a different pool ("MobileClaw 体验额度", 36,000,000 tokens). The plugin does not pass one off as the other — the window is labelled for what it is.

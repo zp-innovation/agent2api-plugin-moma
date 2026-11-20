@@ -68,6 +68,17 @@ file:/data/projects/agent2api/data/script-plugins-src/agent2api-plugin-moma
 - 平台给了真实到期时刻（套餐 `expireTime` 或体验额度 `expireTime`）时，写进账号记录的 `expires`，按「N 天后」显示。
 - 平台没给（当前账号的 `expireTime` 就是 `null`）时显示「—」。**这是宿主的既定行为**：`account_features.long_lived` 由宿主硬编码为「仅本地提供商」，远端插件无法申报「长期有效」，见 `host/models.mjs:30`。
 
+**模型能力**（模型页 → 模型能力弹窗）：
+
+MoMA 的 `/v1/models` 只返回 `{id, object, created, owned_by}`，**不声明**上下文长度、最大输出、模态、工具调用与思考能力——「透传上游」在上游就没有源头。插件分两层补齐：
+
+1. `caps.mjs`：构建期用 `node scripts/gen-caps.mjs` 把 [models.dev](https://models.dev) 的能力表按归一化 id 投影到 MoMA 的模型上（当前 98 / 141 命中，冲突时取上下文最大且 `output < context` 的来源）；
+2. `inferCaps()`：匹配不到时按模型名兜底（`-128k` / `-64k` / `-1M` / `vl` / `r1` …），上下文缺省 32k。
+
+声明字段用宿主 `host/model-records.mjs:33-39` 认的形状：`limit.context` / `limit.output` / `capabilities.toolcall` / `capabilities.reasoning` / `capabilities.input.{image,video,audio,pdf}`，并同时给扁平的 `tool_call` / `reasoning` / `modalities`。面板里不再出现「上游未声明」，也不会默认「不支持」。
+
+复核这张表是否跟得上上游：`node scripts/gen-caps.mjs --check`（需要网络，返回非 0 表示需要重新生成）。
+
 ## 已知边界
 
 1. **移动云 MoMA 控制台首页那张「Token 免费额度 25,000.000K / 2026-12-20 到期」读不到。**
